@@ -1,0 +1,112 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // 0. Global Safety Net
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Primitives
+    function isSignedIn() { return request.auth != null; }
+    // Using email lookup for the bootstrapped admin to allow initial setup.
+    function isBootstrappedAdmin() {
+      return isSignedIn() && (request.auth.token.email == 'tiwarishubham984@gmail.com' || request.auth.token.email == 'tiwariadmin@gmail.com');
+    }
+    // Main Admin check
+    function isAdmin() {
+      return isBootstrappedAdmin() || (isSignedIn() && exists(/databases/$(database)/documents/admins/$(request.auth.uid)));
+    }
+    function isValidId(id) {
+      return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+    function incoming() { return request.resource.data; }
+    function existing() { return resource.data; }
+
+    // Validation definitions
+    function isValidProduct(data) {
+      return data.keys().hasAll(['name', 'categoryId', 'description', 'createdAt', 'updatedAt']) &&
+             data.name is string && data.name.size() > 0 && data.name.size() <= 200 &&
+             data.categoryId is string && data.categoryId.size() > 0 && data.categoryId.size() <= 128 &&
+             data.description is string && data.description.size() <= 5000 &&
+             ( !('imageUrl' in data) || (data.imageUrl is string && data.imageUrl.size() <= 1000) ) &&
+             data.createdAt is timestamp && data.updatedAt is timestamp;
+    }
+
+    function isValidCategory(data) {
+      return data.keys().hasAll(['name', 'createdAt']) &&
+             data.name is string && data.name.size() > 0 && data.name.size() <= 100 &&
+             data.createdAt is timestamp;
+    }
+
+    function isValidContactInquiry(data) {
+      let hasValidPhone = (!('phone' in data) && data.keys().size() == 5) || ('phone' in data && data.phone is string && data.phone.size() <= 50 && data.keys().size() == 6);
+      return data.keys().hasAll(['name', 'email', 'message', 'createdAt', 'status']) && hasValidPhone &&
+             data.name is string && data.name.size() > 0 && data.name.size() <= 200 &&
+             data.email is string && data.email.size() > 0 && data.email.size() <= 200 &&
+             data.message is string && data.message.size() > 0 && data.message.size() <= 2000 &&
+             data.createdAt is timestamp &&
+             data.status in ['new', 'read', 'replied'];
+    }
+
+    function isValidCareer(data) {
+      return data.keys().hasAll(['title', 'description', 'status', 'createdAt', 'updatedAt']) &&
+             data.title is string && data.title.size() > 0 && data.title.size() <= 200 &&
+             data.description is string && data.description.size() > 0 && data.description.size() <= 5000 &&
+             data.status in ['open', 'closed'] &&
+             data.createdAt is timestamp && data.updatedAt is timestamp;
+    }
+    
+    function isValidAdminConfig(data) {
+      return data.keys().hasAll(['email', 'createdAt']) &&
+             data.email is string && data.email.size() > 0 && data.email.size() <= 200 &&
+             data.createdAt is timestamp;
+    }
+
+    // Admins Collection
+    match /admins/{userId} {
+      allow get: if isValidId(userId) && ((isSignedIn() && request.auth.uid == userId) || isAdmin());
+      allow list: if isAdmin();
+      allow create: if isAdmin() && isValidId(userId) && isValidAdminConfig(incoming()) && incoming().createdAt == request.time;
+      allow delete: if isAdmin() && isValidId(userId);
+      allow update: if isAdmin() && isValidId(userId) && isValidAdminConfig(incoming()) && incoming().diff(existing()).affectedKeys().hasOnly(['email']);
+    }
+
+    // Products Collection
+    match /products/{productId} {
+      allow get: if isValidId(productId);
+      allow list: if true;
+      allow create: if isAdmin() && isValidId(productId) && isValidProduct(incoming()) && incoming().createdAt == request.time && incoming().updatedAt == request.time && exists(/databases/$(database)/documents/categories/$(incoming().categoryId));
+      allow update: if isAdmin() && isValidId(productId) && isValidProduct(incoming()) && incoming().updatedAt == request.time && incoming().createdAt == existing().createdAt &&
+        incoming().diff(existing()).affectedKeys().hasOnly(['name', 'categoryId', 'description', 'imageUrl', 'updatedAt']) &&
+        exists(/databases/$(database)/documents/categories/$(incoming().categoryId));
+      allow delete: if isAdmin() && isValidId(productId);
+    }
+
+    // Categories Collection
+    match /categories/{categoryId} {
+      allow get: if isValidId(categoryId);
+      allow list: if true;
+      allow create: if isAdmin() && isValidId(categoryId) && isValidCategory(incoming()) && incoming().createdAt == request.time;
+      allow update: if isAdmin() && isValidId(categoryId) && isValidCategory(incoming()) && incoming().createdAt == existing().createdAt && incoming().diff(existing()).affectedKeys().hasOnly(['name']);
+      allow delete: if isAdmin() && isValidId(categoryId);
+    }
+
+    // Contact Inquiries Collection
+    match /contactInquiries/{inquiryId} {
+      allow get, list: if isAdmin();
+      // Anyone can submit, but cannot update or delete.
+      allow create: if isValidId(inquiryId) && isValidContactInquiry(incoming()) && incoming().createdAt == request.time && incoming().status == 'new';
+      allow update: if isAdmin() && isValidId(inquiryId) && isValidContactInquiry(incoming()) && incoming().createdAt == existing().createdAt && incoming().diff(existing()).affectedKeys().hasOnly(['status', 'name', 'email', 'phone', 'message']);
+      allow delete: if isAdmin() && isValidId(inquiryId);
+    }
+
+    // Careers Collection
+    match /careers/{careerId} {
+      allow get: if isValidId(careerId);
+      allow list: if true;
+      allow create: if isAdmin() && isValidId(careerId) && isValidCareer(incoming()) && incoming().createdAt == request.time && incoming().updatedAt == request.time;
+      allow update: if isAdmin() && isValidId(careerId) && isValidCareer(incoming()) && incoming().createdAt == existing().createdAt && incoming().updatedAt == request.time && incoming().diff(existing()).affectedKeys().hasOnly(['title', 'description', 'status', 'updatedAt']);
+      allow delete: if isAdmin() && isValidId(careerId);
+    }
+  }
+}
